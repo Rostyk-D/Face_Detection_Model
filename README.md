@@ -75,9 +75,9 @@ docker run -p 8501:8501 -v "${PWD}:/tf/project" face-streamlit
 
 ## 📷 Приклади / скриншоти
 
-- **Головна Сторінка** ![img.png](img.png)
-- **Детекція лиця**![img_2.png](img_2.png)
-- **Детекція на кількох зображеннях**![img_4.png](img_4.png)
+- **Головна Сторінка** ![img.png](screenshots/img.png)
+- **Детекція лиця**![img_2.png](screenshots/img_2.png)
+- **Детекція на кількох зображеннях**![img_4.png](screenshots/img_4.png)
 
 (додайте зображення у папку `/screenshots/`
 
