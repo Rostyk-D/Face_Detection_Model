@@ -45,13 +45,15 @@
 ### 1. Встановлення інструментів
 
 - Docker
+- Скачати модель https://drive.google.com/drive/folders/19g58CFFwhmRDpZCfm4axBXsm7hAiDXC5?usp=sharing
 
 ### 2. Клонування репозиторію
 
 ```bash
-git clone https://github.com/your-user/project-name.git
-cd project-name
+git clone https://github.com/Rostyk-D/Face_Detection_Model.git
+cd Face_Detection_Model
 ```
+- Перекінути туда модель
 
 ### 3. Запуск
 
