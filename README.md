@@ -81,8 +81,6 @@ docker run -p 8501:8501 -v "${PWD}:/tf/project" face-streamlit
 - **Детекція лиця**![img_2.png](screenshots/img_2.png)
 - **Детекція на кількох зображеннях**![img_4.png](screenshots/img_4.png)
 
-(додайте зображення у папку `/screenshots/`
-
 ---
 
 ## 🧪 Проблеми і рішення
