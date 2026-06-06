@@ -20,6 +20,8 @@ st.set_page_config(
     layout="wide",
 )
 
+TARGET_SIZE = 224
+
 st.title("🧠 Face Detection Demo")
 st.caption("Завантаж один файл, кілька зображень або ZIP-папку з фото — і подивись результат детекції.")
 
@@ -41,13 +43,27 @@ def load_model(model_path: str):
         raise RuntimeError(f"Не вдалося завантажити модель: {e}")
 
 
-def resize_with_padding_rgb(img_rgb: np.ndarray, target_size: int = 224) -> np.ndarray:
+def resize_with_padding_rgb(
+    img_rgb: np.ndarray,
+    target_size: int = TARGET_SIZE,
+    allow_upscale: bool = True
+) -> np.ndarray:
+    """
+    Масштабує зображення зі збереженням пропорцій і додає padding до target_size x target_size.
+
+    allow_upscale=True  -> маленькі зображення збільшуються до target_size
+    allow_upscale=False -> маленькі зображення не збільшуються, лише доповнюються padding
+    """
     h, w = img_rgb.shape[:2]
+
     scale = target_size / float(max(h, w))
+    if not allow_upscale:
+        scale = min(scale, 1.0)
+
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
 
-    interp = cv2.INTER_AREA if new_w < w or new_h < h else cv2.INTER_LINEAR
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
     resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=interp)
 
     pad_left = (target_size - new_w) // 2
@@ -66,7 +82,7 @@ def resize_with_padding_rgb(img_rgb: np.ndarray, target_size: int = 224) -> np.n
 
 def np_canny_uint8_impl(img_uint8, k_low=0.66, k_high=1.33, d=9, sigmaColor=75, sigmaSpace=75):
     if img_uint8 is None:
-        return np.zeros((224, 224), dtype=np.uint8)
+        return np.zeros((TARGET_SIZE, TARGET_SIZE), dtype=np.uint8)
 
     try:
         img_f = cv2.bilateralFilter(img_uint8, d=d, sigmaColor=sigmaColor, sigmaSpace=sigmaSpace)
@@ -84,52 +100,43 @@ def np_canny_uint8_impl(img_uint8, k_low=0.66, k_high=1.33, d=9, sigmaColor=75, 
     return cv2.Canny(gray, low, high)
 
 
-def stable_mod_type(stem: str) -> int:
+def apply_train_style_augmentation(
+    rgb: np.ndarray,
+    bright_factor: float = 1.30,
+    dark_factor: float = 0.70,
+    noise_sigma: float = 0.12,
+):
     """
-    Стабільно повертає 0..3 для конкретного stem.
-    """
-    digest = hashlib.md5(stem.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) % 4
+    Імітація notebook через три повзунки:
+      - bright_factor: засвітлення
+      - dark_factor: затемнення
+      - noise_sigma: шум
 
-
-def apply_train_style_augmentation(rgb: np.ndarray, stem: str):
+    Усі параметри застосовуються до одного зображення без окремого режиму.
     """
-    Імітація notebook:
-      0 -> чиста + засвітлена
-      1 -> чиста + затемнена
-      2 -> шумна + засвітлена
-      3 -> шумна + затемнена
-    """
-    BRIGHT_FACTOR = 1.30
-    DARK_FACTOR = 0.70
-    TRAIN_NOISE_SIGMA_MIN = 0.10
-    TRAIN_NOISE_SIGMA_MAX = 0.15
+    bright_factor = float(bright_factor)
+    dark_factor = float(dark_factor)
+    noise_sigma = max(0.0, float(noise_sigma))
     SEED = 42
-
-    mod_type = stable_mod_type(stem)
 
     img_f = rgb.astype(np.float32) / 255.0
 
-    seed_int = int(hashlib.md5(f"{stem}_{SEED}".encode("utf-8")).hexdigest()[:8], 16)
+    seed_int = int(hashlib.md5(
+        f"{bright_factor:.4f}_{dark_factor:.4f}_{noise_sigma:.4f}_{SEED}".encode("utf-8")
+    ).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed_int)
 
-    if mod_type == 0:
-        img_f = img_f * BRIGHT_FACTOR
-    elif mod_type == 1:
-        img_f = img_f * DARK_FACTOR
-    elif mod_type == 2:
-        img_f = img_f * BRIGHT_FACTOR
-        sigma = rng.uniform(TRAIN_NOISE_SIGMA_MIN, TRAIN_NOISE_SIGMA_MAX)
-        noise = rng.normal(0.0, sigma, img_f.shape).astype(np.float32)
-        img_f = img_f + noise
-    elif mod_type == 3:
-        img_f = img_f * DARK_FACTOR
-        sigma = rng.uniform(TRAIN_NOISE_SIGMA_MIN, TRAIN_NOISE_SIGMA_MAX)
-        noise = rng.normal(0.0, sigma, img_f.shape).astype(np.float32)
+    # Базова комбінація повзунків: спочатку засвітлення, потім затемнення,
+    # після чого додається шум.
+    img_f = img_f * bright_factor
+    img_f = img_f * dark_factor
+
+    if noise_sigma > 0:
+        noise = rng.normal(0.0, noise_sigma, img_f.shape).astype(np.float32)
         img_f = img_f + noise
 
     img_f = np.clip(img_f, 0.0, 1.0)
-    return (img_f * 255.0).astype(np.uint8), mod_type
+    return (img_f * 255.0).astype(np.uint8)
 
 
 def pil_to_rgb_array(file_obj) -> np.ndarray:
@@ -218,16 +225,30 @@ def draw_boxes(img_rgb: np.ndarray, boxes, conf_threshold: float = 0.5, color=(0
     return out
 
 
-def make_prediction(model, img_rgb: np.ndarray, target_size: int, conf_threshold: float, thickness: int, stem: str):
+def make_prediction(
+    model,
+    img_rgb: np.ndarray,
+    target_size: int,
+    conf_threshold: float,
+    thickness: int,
+    bright_factor: float,
+    dark_factor: float,
+    noise_sigma: float,
+):
     """
     Підготовка input для моделі:
       - resize + padding
-      - train-style augmentation як у notebook
+      - імітація спотворення через повзунки
       - edge map через Canny
     """
-    img_ready = resize_with_padding_rgb(img_rgb, target_size)
+    img_ready = resize_with_padding_rgb(img_rgb, target_size, allow_upscale=True)
 
-    img_used, mod_type = apply_train_style_augmentation(img_ready, stem)
+    img_used = apply_train_style_augmentation(
+        img_ready,
+        bright_factor=bright_factor,
+        dark_factor=dark_factor,
+        noise_sigma=noise_sigma,
+    )
     edge = np_canny_uint8_impl(img_used)
 
     img_in = img_used.astype(np.float32) / 255.0
@@ -238,7 +259,7 @@ def make_prediction(model, img_rgb: np.ndarray, target_size: int, conf_threshold
     boxes = decode_boxes(pred_np)
 
     vis = draw_boxes(img_used, boxes, conf_threshold=conf_threshold, color=(0, 255, 0), thickness=thickness)
-    return img_ready, img_used, edge, vis, boxes, mod_type, pred_np
+    return img_used, edge, vis, boxes, pred_np
 
 
 def image_to_png_bytes(img_rgb: np.ndarray) -> bytes:
@@ -290,6 +311,10 @@ with st.sidebar:
     conf_threshold = st.slider("Поріг впевненості", 0.0, 1.0, 0.30, 0.01)
     thickness = st.slider("Товщина рамки", 1, 6, 2, 1)
 
+    bright_factor = st.slider("Шкала засвітлення", 1.00, 2.00, 1.30, 0.01)
+    dark_factor = st.slider("Шкала затемнення", 0.00, 1.00, 0.70, 0.01)
+    noise_sigma = st.slider("Шкала шуму", 0.00, 0.50, 0.12, 0.01)
+
     st.markdown("---")
     st.info("Підтримка: одиночне фото, кілька фото, ZIP-архів із папкою.")
 
@@ -315,22 +340,24 @@ with tab1:
 
     if up is not None:
         img_rgb = pil_to_rgb_array(up)
-        orig, used, edge, vis, boxes, mod_type, pred_np = make_prediction(
+        distorted, edge, vis, boxes, pred_np = make_prediction(
             model,
             img_rgb,
-            int(target_size),
+            TARGET_SIZE,
             conf_threshold,
             thickness,
-            stem=Path(up.name).stem
+            bright_factor,
+            dark_factor,
+            noise_sigma,
         )
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.subheader("Оригінал")
-            st.image(orig, use_column_width=True)
+            st.subheader("Оригінал (З кастомним спотворенням)")
+            st.image(distorted, use_column_width=True)
         with c2:
-            st.subheader(f"Input after preprocess (mod={mod_type})")
-            st.image(used, use_column_width=True)
+            st.subheader("Canny")
+            st.image(edge, use_column_width=True)
         with c3:
             st.subheader("Результат детекції")
             st.image(vis, use_column_width=True)
@@ -379,22 +406,24 @@ with tab2:
         for idx, up in enumerate(ups, start=1):
             with st.expander(f"{idx}. {up.name}", expanded=(idx == 1)):
                 img_rgb = pil_to_rgb_array(up)
-                orig, used, edge, vis, boxes, mod_type, pred_np = make_prediction(
+                distorted, edge, vis, boxes, pred_np = make_prediction(
                     model,
                     img_rgb,
-                    int(target_size),
+                    TARGET_SIZE,
                     conf_threshold,
                     thickness,
-                    stem=Path(up.name).stem
+                    bright_factor,
+                    dark_factor,
+                    noise_sigma,
                 )
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.image(orig, caption="Оригінал", use_column_width=True)
+                    st.image(distorted, caption="Оригінал (Спотворенна картинка)", use_column_width=True)
                 with c2:
-                    st.image(used, caption=f"Input after preprocess (mod={mod_type})", use_column_width=True)
+                    st.image(edge, caption="Canny", use_column_width=True)
                 with c3:
-                    st.image(vis, caption="Результат", use_column_width=True)
+                    st.image(vis, caption="Результат детекції (На спотворенній картинці)", use_column_width=True)
 
                 scores = [b["score"] for b in boxes]
                 max_score = max(scores) if scores else 0.0
@@ -424,22 +453,24 @@ with tab3:
 
             for idx, (name, img_rgb) in enumerate(images, start=1):
                 with st.expander(f"{idx}. {name}", expanded=(idx == 1)):
-                    orig, used, edge, vis, boxes, mod_type, pred_np = make_prediction(
+                    distorted, edge, vis, boxes, pred_np = make_prediction(
                         model,
                         img_rgb,
-                        int(target_size),
+                        TARGET_SIZE,
                         conf_threshold,
                         thickness,
-                        stem=Path(name).stem
+                        bright_factor,
+                        dark_factor,
+                        noise_sigma,
                     )
 
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        st.image(orig, caption="Оригінал", use_column_width=True)
+                        st.image(distorted, caption="Оригінал (Спотворенна картинка)", use_column_width=True)
                     with c2:
-                        st.image(used, caption=f"Input after preprocess (mod={mod_type})", use_column_width=True)
+                        st.image(edge, caption="Canny", use_column_width=True)
                     with c3:
-                        st.image(vis, caption="Результат", use_column_width=True)
+                        st.image(vis, caption="Результат детекції (На спотворенній картинці)", use_column_width=True)
 
                     scores = [b["score"] for b in boxes]
                     max_score = max(scores) if scores else 0.0
